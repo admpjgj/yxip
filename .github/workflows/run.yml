@@ -1,13 +1,13 @@
-name: 自动抓取IP并更新
+name: 自动更新 IP 列表
 
 on:
   schedule:
-    # 每天北京时间 8:00 运行一次（UTC 时间需减 8 小时）
-    - cron: "0 0 * * *"
-  workflow_dispatch:  # 允许手动触发
+    # 每天北京时间凌晨 5:00 运行（对应 UTC 前一天 21:00）
+    - cron: "0 21 * * *"
+  workflow_dispatch:  # 支持手动触发
 
 jobs:
-  run-script:
+  update-ip-list:
     runs-on: ubuntu-latest
 
     steps:
@@ -24,13 +24,13 @@ jobs:
           pip install -r requirements.txt || true
           pip install requests beautifulsoup4 geoip2
 
-      - name: 运行抓取脚本
-        run: python main.py
+      - name: 运行更新脚本
+        run: python update-ip-list.py   # ← 改成你的实际脚本名
 
       - name: 提交更新结果
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add ip.txt || true
-          git commit -m "自动更新IP列表 $(date '+%Y-%m-%d %H:%M:%S')" || echo "没有更新"
+          git commit -m "自动更新 IP 列表 $(date '+%Y-%m-%d %H:%M:%S')" || echo "没有变化"
           git push
