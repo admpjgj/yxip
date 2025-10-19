@@ -4,31 +4,35 @@ name: IP自动筛选（香港/日本/新加坡）
 on:
   schedule:
     - cron: '0 */3 * * *'  # 分钟 小时 日 月 周（UTC时间，每3小时的0分运行）
-  workflow_dispatch:  # 支持手动触发（可选）
+  workflow_dispatch:  # 支持手动触发
 
 jobs:
   filter-ip:
     runs-on: ubuntu-latest  # 使用Ubuntu环境
     steps:
-      # 1. 拉取仓库代码（添加Token授权，解决推送权限问题）
-      - name: 拉取仓库代码
+      # 1. 拉取仓库代码（关键：用PAT替换默认凭证，同时配置全局git身份）
+      - name: 拉取仓库代码并配置git身份
         uses: actions/checkout@v4
         with:
-          persist-credentials: false  # 关闭默认凭证，使用PAT
-          fetch-depth: 0  # 拉取完整历史
-          token: ${{ secrets.GH_PAT }}  # 引用仓库Secret中的Token，授予拉取权限
+          persist-credentials: true  # 启用凭证持久化（让后续git命令能使用PAT）
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}  # 引用仓库Secret中的Token，授予完整权限
 
-      # 2. 运行IP筛选脚本（无需Python配置和依赖安装，脚本无外部依赖）
+      # 2. 配置全局git提交身份（确保提交时身份合法）
+      - name: 配置git提交身份
+        run: |
+          git config --global user.name "IP筛选Bot"
+          git config --global user.email "ip-filter-bot@example.com"
+
+      # 3. 运行IP筛选脚本（无外部依赖，直接执行）
       - name: 运行IP筛选脚本
-        run: python ip_filter.py  # 执行筛选脚本
+        run: python ip_filter.py
 
-      # 3. 提交筛选结果到仓库（添加Token授权，解决推送权限问题）
+      # 4. 提交并推送更新（移除token参数，改用checkout步骤的凭证）
       - name: 提交更新到仓库
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "自动筛选IP：更新香港/日本/新加坡IP列表（ip2.txt）"  # 提交信息
-          file_pattern: "ip2.txt"  # 仅提交ip2.txt文件
-          commit_user_name: "IP筛选Bot"  # 提交者名称（自定义）
-          commit_user_email: "ip-filter-bot@example.com"  # 提交者邮箱（自定义）
+          file_pattern: "ip2.txt"  # 仅提交筛选结果文件
           push_options: "--force-with-lease"  # 安全推送，避免代码冲突
-          token: ${{ secrets.GH_PAT }}  # 引用Token，授予推送权限
+          skip_dirty_check: false  # 仅当ip2.txt有修改时才提交
