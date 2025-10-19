@@ -1,0 +1,36 @@
+name: 自动抓取IP并更新
+
+on:
+  schedule:
+    # 每天北京时间 8:00 运行一次（UTC 时间需减 8 小时）
+    - cron: "0 0 * * *"
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt || true
+          pip install requests beautifulsoup4 geoip2
+
+      - name: 运行抓取脚本
+        run: python main.py
+
+      - name: 提交更新结果
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add ip.txt || true
+          git commit -m "自动更新IP列表 $(date '+%Y-%m-%d %H:%M:%S')" || echo "没有更新"
+          git push
