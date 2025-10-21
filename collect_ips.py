@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-整合版 Cloudflare IP 采集器
+整合版 Cloudflare IP 采集器（包含http://ip.flares.cloud/）
 """
 
 import os
@@ -33,7 +33,7 @@ MAX_WORKERS = 4
 BASE_TIMEOUT = 12
 RANDOM_JITTER = (1, 3)
 
-# -------------------------- 站点列表 --------------------------
+# -------------------------- 站点列表（新增http://ip.flares.cloud/） --------------------------
 URLS = {
     'low': [
         'https://ip.164746.xyz',
@@ -41,57 +41,52 @@ URLS = {
         'https://www.wetest.vip/page/cloudflare/address_v4.html',
         'https://cfip.ink',
         'https://cloudflareip.fun',
-        'https://ipcf.cc',
-        'https://cfip.top'
     ],
     'medium': [
+        'http://ip.flares.cloud/',  
         'https://stock.hostmonit.com/CloudFlareYes',
         'https://api.uouin.com/cloudflare.html',
         'https://ip.haogege.xyz/',
-        'https://ip.cfw.ltd',
-        'https://cfproxy.net'
     ],
     'high': [
         'https://ipdb.api.030101.xyz/?type=cfv4;proxy',
         'https://addressesapi.090227.xyz/CloudFlareYes',
-        'https://cf.ipshelper.com',
-        'https://cf.haoip.cc'
+        'https://cf.haoip.cc',
     ]
 }
 
-# -------------------------- 提取规则 --------------------------
+# -------------------------- 提取规则（新增ip.flares.cloud的规则） --------------------------
 SITE_RULES: Dict[str, Dict] = {
+    # 原有规则...
+    'ip.flares.cloud': {  # 适配新增站点的IP结构
+        'tag': 'div', 
+        'attrs': {'class': 'tabulator-cell', 'tabulator-field': 'ip'}  # 精准匹配IP所在标签
+    },
     'ip.164746.xyz': {'tag': 'pre', 'attrs': {}},
     'cf.090227.xyz': {'tag': 'div', 'attrs': {'class': 'ip-list'}},
     'www.wetest.vip': {'tag': 'pre', 'attrs': {'class': 'ip-pre'}},
     'cfip.ink': {'tag': 'pre', 'attrs': {}},
     'cloudflareip.fun': {'tag': 'textarea', 'attrs': {'class': 'ip-text'}},
-    'ipcf.cc': {'tag': 'textarea', 'attrs': {}},
-    'cfip.top': {'tag': 'pre', 'attrs': {}},
     'stock.hostmonit.com': {'tag': 'div', 'attrs': {'class': 'card-body'}},
     'api.uouin.com': {'tag': 'pre', 'attrs': {}},
     'ip.haogege.xyz': {'tag': 'div', 'attrs': {'id': 'ip-content'}},
-    'ip.cfw.ltd': {'tag': 'pre', 'attrs': {}},
-    'cfproxy.net': {'tag': 'div', 'attrs': {'class': 'proxy-list'}},
     'ipdb.api.030101.xyz': {
         'script_pattern': r'var\s+ips\s*=\s*\[([^\]]+)\]',
         'ip_clean_pattern': r'"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:\d+)"'
     },
     'addressesapi.090227.xyz': {'tag': 'pre', 'attrs': {}},
-    'cf.ipshelper.com': {'tag': 'div', 'attrs': {'class': 'ip-list'}},
-    'cf.haoip.cc': {'tag': 'pre', 'attrs': {}}
+    'cf.haoip.cc': {'tag': 'pre', 'attrs': {}},
 }
 
-# -------------------------- 工具类（修复fake_useragent参数错误） --------------------------
+# -------------------------- 工具类 --------------------------
 class AntiBlockTool:
     def __init__(self):
-        # 关键修复：移除use_cache_server参数，兼容旧版本fake_useragent
-        self.ua = UserAgent()  # 旧版本不支持use_cache_server，直接初始化
+        self.ua = UserAgent()  # 兼容旧版本fake_useragent
         self.headers_pool = self._generate_headers_pool(15)
 
     def _generate_headers_pool(self, count: int) -> List[dict]:
         headers_list = []
-        referers = ["https://www.google.com/", "https://www.baidu.com/", "https://github.com/", "https://www.bing.com/"]
+        referers = ["https://www.google.com/", "https://www.baidu.com/", "https://github.com/"]
         for _ in range(count):
             headers = {
                 "User-Agent": self.ua.random,
@@ -187,7 +182,7 @@ class SmartFetcher:
         })
         return driver
 
-# -------------------------- IP提取 --------------------------
+# -------------------------- IP提取（适配新增站点） --------------------------
 def extract_ips(html: str, url: str) -> List[str]:
     if not html:
         logging.warning(f"[{url}] 页面为空")
@@ -201,6 +196,7 @@ def extract_ips(html: str, url: str) -> List[str]:
     domain = url.split("//")[-1].split("/")[0].split(".")[-2]
     ips = []
 
+    # 优先用站点规则提取（包含新增的ip.flares.cloud）
     if domain in SITE_RULES:
         rule = SITE_RULES[domain]
         if 'script_pattern' in rule:
@@ -212,13 +208,18 @@ def extract_ips(html: str, url: str) -> List[str]:
                 return ips
         elif 'tag' in rule:
             soup = BeautifulSoup(html, "lxml")
-            target_tag = soup.find(rule['tag'], attrs=rule['attrs'])
-            if target_tag:
-                content = target_tag.get_text()
-                ips = IP_PATTERN.findall(content) + IP_WITH_PORT_PATTERN.findall(content)
+            # 查找所有符合条件的标签（可能有多个IP标签）
+            target_tags = soup.find_all(rule['tag'], attrs=rule['attrs'])
+            if target_tags:
+                # 从每个标签中提取IP
+                for tag in target_tags:
+                    content = tag.get_text().strip()
+                    if IP_PATTERN.match(content):  # 确保内容是IP
+                        ips.append(content)
                 logging.info(f"[{url}] 标签规则提取到 {len(ips)} 个IP")
                 return ips
 
+    # 通用提取（兜底）
     ips = IP_PATTERN.findall(html) + IP_WITH_PORT_PATTERN.findall(html)
     logging.info(f"[{url}] 通用规则提取到 {len(ips)} 个IP")
     return ips
