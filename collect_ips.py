@@ -30,6 +30,7 @@ RANDOM_JITTER = (1, 3)  # 随机暂停区间（秒）
 
 # 目标站点
 URLS = [
+    'http://ip.flares.cloud/',
     'https://ip.164746.xyz', 
     'https://cf.090227.xyz', 
     'https://stock.hostmonit.com/CloudFlareYes',
