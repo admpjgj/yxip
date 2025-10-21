@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-整合版 Cloudflare IP 采集器（优化后）
+整合版 Cloudflare IP 采集器
 """
 
 import os
@@ -19,22 +19,21 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 
-# -------------------------- 核心配置（优化点：增强IP提取和容错） --------------------------
+# -------------------------- 核心配置 --------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)s - %(message)s",
     datefmt="%H:%M:%S",
 )
 
-# 优化点1：增强IP正则，确保带端口的IP也能被提取
 IP_PATTERN = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
 IP_WITH_PORT_PATTERN = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}:\d+\b')
 OUTPUT_FILE = "ip.txt"
 MAX_WORKERS = 4
-BASE_TIMEOUT = 12  # 优化点2：延长超时，适配慢加载站点
+BASE_TIMEOUT = 12
 RANDOM_JITTER = (1, 3)
 
-# -------------------------- 站点列表（保留所有有效站点） --------------------------
+# -------------------------- 站点列表 --------------------------
 URLS = {
     'low': [
         'https://ip.164746.xyz',
@@ -53,16 +52,15 @@ URLS = {
         'https://cfproxy.net'
     ],
     'high': [
-        'https://ipdb.api.030101.xyz/?type=cfv4;proxy',  # 重点优化站点
+        'https://ipdb.api.030101.xyz/?type=cfv4;proxy',
         'https://addressesapi.090227.xyz/CloudFlareYes',
         'https://cf.ipshelper.com',
         'https://cf.haoip.cc'
     ]
 }
 
-# -------------------------- 提取规则（优化点3：增强ipdb站点解析） --------------------------
+# -------------------------- 提取规则 --------------------------
 SITE_RULES: Dict[str, Dict] = {
-    # 低风险站点规则
     'ip.164746.xyz': {'tag': 'pre', 'attrs': {}},
     'cf.090227.xyz': {'tag': 'div', 'attrs': {'class': 'ip-list'}},
     'www.wetest.vip': {'tag': 'pre', 'attrs': {'class': 'ip-pre'}},
@@ -70,29 +68,25 @@ SITE_RULES: Dict[str, Dict] = {
     'cloudflareip.fun': {'tag': 'textarea', 'attrs': {'class': 'ip-text'}},
     'ipcf.cc': {'tag': 'textarea', 'attrs': {}},
     'cfip.top': {'tag': 'pre', 'attrs': {}},
-
-    # 中风险站点规则
     'stock.hostmonit.com': {'tag': 'div', 'attrs': {'class': 'card-body'}},
     'api.uouin.com': {'tag': 'pre', 'attrs': {}},
     'ip.haogege.xyz': {'tag': 'div', 'attrs': {'id': 'ip-content'}},
     'ip.cfw.ltd': {'tag': 'pre', 'attrs': {}},
     'cfproxy.net': {'tag': 'div', 'attrs': {'class': 'proxy-list'}},
-
-    # 高风险站点规则（优化点：精准匹配ipdb的JS变量）
     'ipdb.api.030101.xyz': {
-        'script_pattern': r'var\s+ips\s*=\s*\[([^\]]+)\]',  # 完整匹配变量
-        'ip_clean_pattern': r'"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:\d+)"'  # 只提取带端口的有效IP
+        'script_pattern': r'var\s+ips\s*=\s*\[([^\]]+)\]',
+        'ip_clean_pattern': r'"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:\d+)"'
     },
     'addressesapi.090227.xyz': {'tag': 'pre', 'attrs': {}},
     'cf.ipshelper.com': {'tag': 'div', 'attrs': {'class': 'ip-list'}},
     'cf.haoip.cc': {'tag': 'pre', 'attrs': {}}
 }
 
-# -------------------------- 工具类（优化点4：修复fake_useragent和反爬） --------------------------
+# -------------------------- 工具类（修复fake_useragent参数错误） --------------------------
 class AntiBlockTool:
     def __init__(self):
-        # 优化点：禁用远程服务器，解决503错误
-        self.ua = UserAgent(use_cache_server=False)
+        # 关键修复：移除use_cache_server参数，兼容旧版本fake_useragent
+        self.ua = UserAgent()  # 旧版本不支持use_cache_server，直接初始化
         self.headers_pool = self._generate_headers_pool(15)
 
     def _generate_headers_pool(self, count: int) -> List[dict]:
@@ -152,7 +146,6 @@ class SmartFetcher:
         return self._fetch_with_browser(url, quick_mode=True)
 
     def _fetch_high_risk(self, url: str) -> str:
-        # 优化点5：针对ipdb站点延长等待时间
         is_ipdb = 'ipdb.api.030101.xyz' in url
         
         if not self.driver:
@@ -161,12 +154,10 @@ class SmartFetcher:
         try:
             logging.info(f"浏览器访问高风险站点：{url}")
             self.driver.get(url)
-            # 等待验证通过（ipdb站点延长至20秒）
             wait_time = 20 if is_ipdb else 15
             WebDriverWait(self.driver, wait_time).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
-            # 等待JS渲染IP（ipdb站点延长至8-12秒）
             js_wait = random.uniform(8, 12) if is_ipdb else random.uniform(3, 5)
             logging.info(f"等待JS渲染：{js_wait:.1f}秒")
             time.sleep(js_wait)
@@ -189,65 +180,55 @@ class SmartFetcher:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument(f"user-agent={self.anti_block.ua.random}")
-        options.headless = False  # 高风险站点必须关闭无头模式
+        options.headless = False
         driver = uc.Chrome(options=options)
-        # 隐藏自动化标记
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
         })
         return driver
 
-# -------------------------- IP提取（优化点6：增强ipdb站点提取） --------------------------
+# -------------------------- IP提取 --------------------------
 def extract_ips(html: str, url: str) -> List[str]:
     if not html:
         logging.warning(f"[{url}] 页面为空")
         return []
     
-    # 优化点：优先检查带端口的IP
     has_ip = IP_PATTERN.search(html) or IP_WITH_PORT_PATTERN.search(html)
     if not has_ip:
         logging.warning(f"[{url}] 页面无有效IP")
         return []
     
-    # 提取主域名（适配子域名）
     domain = url.split("//")[-1].split("/")[0].split(".")[-2]
     ips = []
 
-    # 优先用站点规则提取
     if domain in SITE_RULES:
         rule = SITE_RULES[domain]
-        # 针对ipdb站点的JS变量提取
         if 'script_pattern' in rule:
-            # 优化点：使用DOTALL模式匹配多行内容
             script_match = re.search(rule['script_pattern'], html, re.IGNORECASE | re.DOTALL)
             if script_match:
                 ips_str = script_match.group(1)
                 ips = re.findall(rule['ip_clean_pattern'], ips_str)
                 logging.info(f"[{url}] JS规则提取到 {len(ips)} 个IP")
                 return ips
-        # 其他站点的标签提取
         elif 'tag' in rule:
             soup = BeautifulSoup(html, "lxml")
             target_tag = soup.find(rule['tag'], attrs=rule['attrs'])
             if target_tag:
                 content = target_tag.get_text()
-                # 优化点：同时提取纯IP和带端口的IP
                 ips = IP_PATTERN.findall(content) + IP_WITH_PORT_PATTERN.findall(content)
                 logging.info(f"[{url}] 标签规则提取到 {len(ips)} 个IP")
                 return ips
 
-    # 通用提取（兜底）
     ips = IP_PATTERN.findall(html) + IP_WITH_PORT_PATTERN.findall(html)
     logging.info(f"[{url}] 通用规则提取到 {len(ips)} 个IP")
     return ips
 
-# -------------------------- 主流程（优化点7：确保文件生成） --------------------------
+# -------------------------- 主流程 --------------------------
 def process_url(url: str, risk_level: str, fetcher: SmartFetcher, anti_block: AntiBlockTool) -> Set[str]:
     ips = set()
     try:
         html = fetcher.fetch(url, risk_level)
         raw_ips = extract_ips(html, url)
-        # 过滤无效IP
         for ip in raw_ips:
             ip_clean = ip.split(":")[0]
             if (
@@ -268,26 +249,22 @@ def main():
     fetcher = SmartFetcher(anti_block)
     all_ips: Set[str] = set()
 
-    # 1. 并行处理低风险站点
     logging.info("=== 处理低风险站点（并行） ===")
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [executor.submit(process_url, url, 'low', fetcher, anti_block) for url in URLS['low']]
         for future in concurrent.futures.as_completed(futures):
             all_ips.update(future.result())
 
-    # 2. 串行处理中高风险站点
     for risk_level in ['medium', 'high']:
         logging.info(f"\n=== 处理{risk_level}风险站点（串行） ===")
         for url in URLS[risk_level]:
             ips = process_url(url, risk_level, fetcher, anti_block)
             all_ips.update(ips)
 
-    # 保存结果（优化点8：强制生成文件，显示保存路径）
     sorted_ips = sorted(all_ips, key=lambda x: tuple(map(int, x.split(":")[0].split("."))))
     try:
         with open(OUTPUT_FILE, "w", encoding="utf8") as f:
             f.write("\n".join(sorted_ips))
-        # 显示文件绝对路径
         file_path = os.path.abspath(OUTPUT_FILE)
         logging.info(f"\n=== 抓取完成 ===")
         logging.info(f"总耗时：{time.time() - start_time:.2f}秒")
@@ -298,5 +275,4 @@ def main():
         logging.error(f"请检查路径权限：{os.path.abspath(OUTPUT_FILE)}")
 
 if __name__ == "__main__":
-    # 优化点9：删除提前删除文件的逻辑，避免误删
     main()
