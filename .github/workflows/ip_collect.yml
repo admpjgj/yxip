@@ -1,0 +1,75 @@
+name: 自动抓取优选CF IP并同步更新
+on:
+  # 1. 每3小时自动执行（匹配README的定时抓取需求）
+  schedule:
+    - cron: '0 */3 * * *'
+  # 2. 手动触发（方便测试，无需等定时任务）
+  workflow_dispatch:
+
+jobs:
+  ip-collect-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 授予写入仓库的权限（解决推送权限问题）
+    steps:
+      # 步骤1：拉取远程仓库最新代码（初始同步，避免本地与远程脱节）
+      - name: 拉取远程仓库完整代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 拉取所有历史提交，确保不遗漏远程更新
+          ref: main       # 明确指定拉取main分支
+
+      # 步骤2：安装爬虫依赖（确保requests、BeautifulSoup4可用）
+      - name: 安装Python依赖库
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4  # 爬虫核心依赖
+
+      # 步骤3：执行IP抓取脚本（生成ip.txt）
+      - name: 运行IP抓取脚本
+        run: python collect_ips.py
+        continue-on-error: false  # 抓取失败直接终止，避免提交空文件
+
+      # 步骤4：执行IP筛选脚本（生成香港/日本/新加坡IP列表ip2.txt）
+      - name: 运行IP筛选脚本
+        run: python ip_filter.py
+        continue-on-error: false
+
+      # 步骤5：强制同步远程最新代码（核心解决冲突步骤）
+      - name: 同步远程代码并处理冲突
+        run: |
+          # 拉取远程main分支最新更新
+          git fetch origin main
+          # 合并远程代码，若有冲突则自动保留本地抓取结果（优先保证IP更新）
+          git merge origin/main -X ours --no-edit || true
+          # 若合并失败，强制重置到远程最新状态后重新合并（双重保险）
+          if [ $? -ne 0 ]; then
+            git reset --hard origin/main
+            git merge --no-ff -X ours HEAD --no-edit
+          fi
+
+      # 步骤6：提交并推送更新到远程仓库
+      - name: 提交修改并推送
+        run: |
+          # 配置Git提交者信息（匹配Actions环境）
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
+          
+          # 检查是否有IP文件修改（避免空提交）
+          if git status | grep -q -E "ip.txt|ip2.txt"; then
+            git add ip.txt ip2.txt  # 只提交IP相关文件，防止误提交其他内容
+            git commit -m "自动更新：抓取最新优选CF IP（含香港/日本/新加坡筛选）"
+            # 推送时强制指定main分支，避免分支不匹配
+            git push origin HEAD:main
+            echo "IP更新成功！已推送ip.txt和ip2.txt到远程仓库"
+          else
+            echo "无新IP更新，无需提交"
+          fi
+
+      # 步骤7：输出执行结果（方便排查问题）
+      - name: 输出最终文件状态
+        run: |
+          echo "=== 当前ip.txt文件行数 ==="
+          wc -l ip.txt || echo "ip.txt不存在"
+          echo "=== 当前ip2.txt文件行数 ==="
+          wc -l ip2.txt || echo "ip2.txt不存在"
