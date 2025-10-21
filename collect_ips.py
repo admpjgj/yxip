@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-增强版 CloudFlare IP 采集器（保留有效站点，提升抓取量）
+增强版 IP 采集器（专门修复 ipdb.api.030101.xyz 站点抓取问题）
 """
 
 import os
@@ -13,6 +13,7 @@ from typing import Set, List
 import requests
 from fake_useragent import UserAgent
 import undetected_chromedriver as uc
+from bs4 import BeautifulSoup
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,12 +23,14 @@ logging.basicConfig(
 
 # 核心配置
 IP_PATTERN = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
+# 针对 ipdb.api.030101.xyz 的特殊IP格式（可能包含端口，如 1.2.3.4:80）
+IP_WITH_PORT_PATTERN = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}:\d+\b')
 OUTPUT_FILE = "ip.txt"
-RETRY_TIMES = 2  # 单站点重试次数（平衡效率与成功率）
-TIMEOUT = 12  # 延长超时，适配更多站点
-RANDOM_JITTER = (2, 5)  # 随机间隔，降低反爬风险
+RETRY_TIMES = 3  # 增加该站点的重试次数
+TIMEOUT = 15
+RANDOM_JITTER = (3, 6)
 
-# 目标站点列表（移除已确认失效的ip.flares.cloud，保留其余所有）
+# 目标站点列表
 URLS = [
     'https://ip.164746.xyz', 
     'https://cf.090227.xyz', 
@@ -39,29 +42,34 @@ URLS = [
     'https://api.uouin.com/cloudflare.html',
     'https://addressesapi.090227.xyz/CloudFlareYes',
     'https://addressesapi.090227.xyz/ip.164746.xyz',
-    'https://ipdb.api.030101.xyz/?type=cfv4;proxy',
-    'https://ipdb.api.030101.xyz/?type=bestcf&country=true',
-    'https://ipdb.api.030101.xyz/?type=bestproxy&country=true',
+    'https://ipdb.api.030101.xyz/?type=cfv4;proxy',  # 重点修复
+    'https://ipdb.api.030101.xyz/?type=bestcf&country=true',  # 同域名站点
+    'https://ipdb.api.030101.xyz/?type=bestproxy&country=true',  # 同域名站点
     'https://www.wetest.vip/page/edgeone/address_v4.html',
     'https://www.wetest.vip/page/cloudfront/address_v4.html',
     'https://www.wetest.vip/page/cloudflare/address_v4.html'
 ]
 
-# 代理池优化：仅在特定难爬站点使用代理，其余直连
+# 站点特殊处理规则（重点新增 ipdb.api.030101.xyz 规则）
+SITE_RULES = {
+    'api.uouin.com': {'tag': 'pre', 'attrs': {}},
+    'cf.vvhan.com': {'tag': 'textarea', 'attrs': {'id': 'iparea'}},
+    'stock.hostmonit.com': {'tag': 'div', 'attrs': {'class': 'card-body'}},
+    # ipdb.api.030101.xyz 的IP藏在JavaScript变量中
+    'ipdb.api.030101.xyz': {
+        'script_pattern': r'var\s+ips\s*=\s*\[([^\]]+)\]',  # 匹配 var ips = [ ... ]
+        'ip_clean_pattern': r'"([^"]+)"'  # 从匹配结果中提取IP字符串
+    }
+}
+
 class SmartProxyRotator:
     def __init__(self):
         self.proxies = []
         self._fetch_proxies()
-        # 需要代理的难爬站点（根据实际情况调整）
-        self.need_proxy_domains = {
-            'ipdb.api.030101.xyz',
-            'addressesapi.090227.xyz'
-        }
+        self.need_proxy_domains = {'ipdb.api.030101.xyz', 'addressesapi.090227.xyz'}
 
     def _fetch_proxies(self):
-        """获取高质量代理（改用更稳定的免费代理源）"""
         try:
-            # 切换到更稳定的代理API
             proxy_api = "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all"
             resp = requests.get(proxy_api, timeout=15)
             self.proxies = [f"http://{p}" for p in resp.text.strip().split() if p]
@@ -72,56 +80,84 @@ class SmartProxyRotator:
             self.proxies = []
 
     def get(self, url: str) -> str:
-        """根据URL判断是否需要使用代理"""
         domain = url.split("//")[-1].split("/")[0]
         if domain not in self.need_proxy_domains:
-            return ""  # 直连
-        
+            return ""
         if not self.proxies:
             self._fetch_proxies()
-        return self.proxies.pop() if self.proxies else ""  # 弹出一个代理使用
+        return self.proxies.pop() if self.proxies else ""
 
-# 初始化工具
 proxy_rotator = SmartProxyRotator()
 ua = UserAgent()
 
 def _random_headers() -> dict:
-    """生成更贴近真实浏览器的请求头"""
     return {
         "User-Agent": ua.random,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.7,en;q=0.3",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": random.choice([
-            "https://www.google.com/",
-            "https://www.baidu.com/",
-            "https://github.com/",
-            "https://www.bing.com/"
-        ]),
-        "DNT": "1",
+        "Referer": random.choice(["https://www.google.com/", "https://www.baidu.com/"]),
         "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "cross-site",
-        "Sec-Fetch-User": "?1",
     }
 
 def _sleep():
-    """随机延迟，模拟人工浏览"""
     time.sleep(random.uniform(*RANDOM_JITTER))
 
 def _sort_ip(ip: str):
-    """按IP段排序，便于去重和查看"""
-    return tuple(map(int, ip.split(".")))
+    # 移除端口后排序（如 1.2.3.4:80 → 1.2.3.4）
+    ip_clean = ip.split(":")[0]
+    return tuple(map(int, ip_clean.split(".")))
 
-# ---------- 请求逻辑（增强版） ----------
+# ---------- 关键修复：增强IP提取逻辑（针对 ipdb.api.030101.xyz） ----------
+def extract_ips_from_html(html: str, url: str) -> List[str]:
+    """根据不同网站的结构，精准提取IP（重点处理 ipdb 站点）"""
+    domain = url.split("//")[-1].split("/")[0]
+    ips = []
+
+    # 1. 处理 ipdb.api.030101.xyz 站点（IP藏在JavaScript变量中）
+    if domain == 'ipdb.api.030101.xyz':
+        rule = SITE_RULES[domain]
+        # 从HTML中匹配包含IP的JavaScript变量（如 var ips = ["1.2.3.4:80", ...]）
+        script_match = re.search(rule['script_pattern'], html, re.IGNORECASE)
+        if script_match:
+            # 提取变量中的内容（如 ["1.2.3.4:80", "5.6.7.8:443"]）
+            ips_str = script_match.group(1)
+            # 从内容中提取所有IP（带端口）
+            ip_matches = re.findall(rule['ip_clean_pattern'], ips_str)
+            ips = ip_matches
+            logging.info(f"从 {domain} 的JavaScript中提取到 {len(ips)} 个IP（带端口）")
+        return ips
+
+    # 2. 处理其他站点的特殊规则
+    if domain in SITE_RULES and 'tag' in SITE_RULES[domain]:
+        rule = SITE_RULES[domain]
+        soup = BeautifulSoup(html, "html.parser")
+        target_tag = soup.find(rule['tag'], attrs=rule['attrs'])
+        if target_tag:
+            content = target_tag.get_text()
+            ips = IP_PATTERN.findall(content)
+            logging.info(f"使用特殊规则从 {domain} 提取到 {len(ips)} 个IP")
+            return ips
+    
+    # 3. 通用提取（全页面搜索）
+    all_text = BeautifulSoup(html, "html.parser").get_text()
+    ips = IP_PATTERN.findall(all_text)
+    # 补充提取带端口的IP（如 1.2.3.4:80）
+    ips_with_port = IP_WITH_PORT_PATTERN.findall(all_text)
+    ips.extend(ips_with_port)
+    return ips
+
+# ---------- 请求逻辑（增强 ipdb 站点的浏览器处理） ----------
 def requests_fallback(url: str) -> str:
-    """智能请求策略：直连优先，难爬站点用代理，最后用浏览器"""
+    domain = url.split("//")[-1].split("/")[0]
     proxy = proxy_rotator.get(url)
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
-    # 先尝试普通请求
+    # 对 ipdb 站点优先使用浏览器请求（因为反爬严格）
+    if domain == 'ipdb.api.030101.xyz':
+        logging.info(f"{domain} 反爬严格，直接使用浏览器请求")
+        return _selenium_get(url)
+
+    # 其他站点先尝试普通请求
     for attempt in range(1, RETRY_TIMES + 1):
         try:
             logging.info(f"尝试[{attempt}/{RETRY_TIMES}] {url} {f'（代理：{proxy}）' if proxy else ''}")
@@ -131,74 +167,62 @@ def requests_fallback(url: str) -> str:
                 proxies=proxies,
                 timeout=TIMEOUT,
                 allow_redirects=True,
-                verify=False  # 忽略SSL证书错误（部分站点可能证书过期）
+                verify=False
             )
             if 200 <= resp.status_code < 300:
                 return resp.text
-            logging.warning(f"状态码异常: {resp.status_code}，将重试")
+            logging.warning(f"状态码异常: {resp.status_code}")
         except Exception as e:
             logging.warning(f"请求失败: {e}")
         _sleep()
 
-    # 普通请求失败，用浏览器重试（增强反爬）
     return _selenium_get(url)
 
 def _selenium_get(url: str) -> str:
-    """增强版浏览器请求，提高绕过反爬成功率"""
+    """增强浏览器请求，确保通过 Cloudflare 验证"""
     logging.info(f"启用增强版 Undetected Chrome 访问: {url}")
     options = uc.ChromeOptions()
-    
-    # 核心反检测配置
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--user-data-dir=/tmp/chrome-user-data")  # 模拟用户数据
-    options.add_argument("--disable-extensions")
+    options.add_argument("--user-data-dir=/tmp/chrome-user-data")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--start-maximized")
-    options.add_argument(f"--window-size={random.randint(1200, 1920)},{random.randint(800, 1080)}")
-    
-    # 随机User-Agent（避免默认值被识别）
     options.add_argument(f"user-agent={ua.random}")
-    
-    # 禁用无头模式（部分站点检测无头浏览器）
-    options.headless = False
+    options.headless = False  # 必须关闭无头模式，否则无法通过5秒盾
 
     driver = uc.Chrome(options=options)
     try:
-        # 移除webdriver标记
+        # 移除自动化标记
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh'] });
+                window.navigator.chrome = { runtime: {}, };
+                window.navigator.languages = ['zh-CN', 'zh'];
             """
         })
-        
         driver.get(url)
-        # 动态等待时间（根据站点难度调整）
-        wait_time = random.uniform(6, 10)
-        logging.info(f"浏览器等待 {wait_time:.1f} 秒加载页面")
+        # 针对 Cloudflare 5秒盾，延长等待时间（至少10秒）
+        wait_time = random.uniform(10, 15)
+        logging.info(f"等待 {wait_time:.1f} 秒以通过反爬验证")
         time.sleep(wait_time)
-        
         return driver.page_source
     finally:
         driver.quit()
 
 # ---------- 主流程 ----------
 def crawl() -> Set[str]:
-    """抓取所有站点的IP，去重后返回"""
     ips = set()
     for url in URLS:
         try:
             html = requests_fallback(url)
-            # 提取IP并过滤内网IP（10.x.x.x、192.168.x.x、172.x.x.x）
-            raw_ips = IP_PATTERN.findall(html)
-            valid_ips = [
-                ip for ip in raw_ips
-                if not ip.startswith(("10.", "192.168.", "172."))
-                and all(0 <= int(seg) <= 255 for seg in ip.split("."))  # 过滤无效IP（如999.999.999.999）
-            ]
+            raw_ips = extract_ips_from_html(html, url)
+            # 过滤无效IP（保留带端口的IP，但验证IP部分有效性）
+            valid_ips = []
+            for ip in raw_ips:
+                ip_clean = ip.split(":")[0]  # 移除端口
+                # 验证IP格式（0-255的四段数字）
+                if (not ip_clean.startswith(("10.", "192.168.", "172.")) 
+                    and all(0 <= int(seg) <= 255 for seg in ip_clean.split("."))):
+                    valid_ips.append(ip)  # 保留原始格式（可能带端口）
             ips.update(valid_ips)
             logging.info(f"从 {url} 提取到 {len(valid_ips)} 个有效IP（累计：{len(ips)}）")
         except Exception as e:
@@ -207,16 +231,13 @@ def crawl() -> Set[str]:
     return ips
 
 def save(ips: Set[str]):
-    """保存IP到文件，确保文件始终存在"""
     sorted_ips = sorted(ips, key=_sort_ip) if ips else []
     with open(OUTPUT_FILE, "w", encoding="utf8") as f:
         f.write("\n".join(sorted_ips))
     logging.info(f"最终抓取到 {len(sorted_ips)} 个唯一有效IP，已保存到 {OUTPUT_FILE}")
 
 if __name__ == "__main__":
-    # 清除旧文件
     if os.path.exists(OUTPUT_FILE):
         os.remove(OUTPUT_FILE)
-    # 执行抓取并保存
     ip_set = crawl()
     save(ip_set)
