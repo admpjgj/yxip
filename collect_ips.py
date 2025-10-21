@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-整合版 Cloudflare IP 采集器（包含http://ip.flares.cloud/）
+Cloudflare IP 采集器（适配http://ip.flares.cloud/动态渲染）
 """
 
 import os
@@ -33,40 +33,35 @@ MAX_WORKERS = 4
 BASE_TIMEOUT = 12
 RANDOM_JITTER = (1, 3)
 
-# -------------------------- 站点列表（新增http://ip.flares.cloud/） --------------------------
+# -------------------------- 站点列表（将ip.flares.cloud移至high风险，强制浏览器访问） --------------------------
 URLS = {
     'low': [
         'https://ip.164746.xyz',
         'https://cf.090227.xyz',
         'https://www.wetest.vip/page/cloudflare/address_v4.html',
-        'https://cfip.ink',
-        'https://cloudflareip.fun',
     ],
     'medium': [
-        'http://ip.flares.cloud/',  
         'https://stock.hostmonit.com/CloudFlareYes',
         'https://api.uouin.com/cloudflare.html',
         'https://ip.haogege.xyz/',
     ],
     'high': [
+        'http://ip.flares.cloud/',  # 移至high风险，用浏览器加载JS
         'https://ipdb.api.030101.xyz/?type=cfv4;proxy',
         'https://addressesapi.090227.xyz/CloudFlareYes',
-        'https://cf.haoip.cc',
     ]
 }
 
-# -------------------------- 提取规则（新增ip.flares.cloud的规则） --------------------------
+# -------------------------- 提取规则 --------------------------
 SITE_RULES: Dict[str, Dict] = {
-    # 原有规则...
-    'ip.flares.cloud': {  # 适配新增站点的IP结构
+    'ip.flares.cloud': {  # 适配该站点的动态标签
         'tag': 'div', 
-        'attrs': {'class': 'tabulator-cell', 'tabulator-field': 'ip'}  # 精准匹配IP所在标签
+        'attrs': {'class': 'tabulator-cell', 'tabulator-field': 'ip'}
     },
+    # 其他站点规则不变...
     'ip.164746.xyz': {'tag': 'pre', 'attrs': {}},
     'cf.090227.xyz': {'tag': 'div', 'attrs': {'class': 'ip-list'}},
     'www.wetest.vip': {'tag': 'pre', 'attrs': {'class': 'ip-pre'}},
-    'cfip.ink': {'tag': 'pre', 'attrs': {}},
-    'cloudflareip.fun': {'tag': 'textarea', 'attrs': {'class': 'ip-text'}},
     'stock.hostmonit.com': {'tag': 'div', 'attrs': {'class': 'card-body'}},
     'api.uouin.com': {'tag': 'pre', 'attrs': {}},
     'ip.haogege.xyz': {'tag': 'div', 'attrs': {'id': 'ip-content'}},
@@ -75,18 +70,17 @@ SITE_RULES: Dict[str, Dict] = {
         'ip_clean_pattern': r'"([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:\d+)"'
     },
     'addressesapi.090227.xyz': {'tag': 'pre', 'attrs': {}},
-    'cf.haoip.cc': {'tag': 'pre', 'attrs': {}},
 }
 
 # -------------------------- 工具类 --------------------------
 class AntiBlockTool:
     def __init__(self):
-        self.ua = UserAgent()  # 兼容旧版本fake_useragent
+        self.ua = UserAgent()
         self.headers_pool = self._generate_headers_pool(15)
 
     def _generate_headers_pool(self, count: int) -> List[dict]:
         headers_list = []
-        referers = ["https://www.google.com/", "https://www.baidu.com/", "https://github.com/"]
+        referers = ["https://www.google.com/", "https://www.baidu.com/"]
         for _ in range(count):
             headers = {
                 "User-Agent": self.ua.random,
@@ -122,7 +116,7 @@ class SmartFetcher:
         for attempt in range(2):
             try:
                 headers = self.anti_block.get_random_headers()
-                logging.info(f"直连[{attempt+1}/2] {url}（UA：{headers['User-Agent'][:20]}...）")
+                logging.info(f"直连[{attempt+1}/2] {url}")
                 resp = requests.get(
                     url,
                     headers=headers,
@@ -131,42 +125,37 @@ class SmartFetcher:
                     verify=False
                 )
                 resp.raise_for_status()
-                if IP_PATTERN.search(resp.text) or IP_WITH_PORT_PATTERN.search(resp.text):
+                if IP_PATTERN.search(resp.text):
                     return resp.text
                 logging.warning(f"页面无IP，重试")
             except Exception as e:
-                logging.warning(f"直连失败[{attempt+1}]：{e}")
+                logging.warning(f"直连失败：{e}")
             self.anti_block.dynamic_sleep(risk_level)
-        logging.info(f"直连失败，用浏览器访问 {url}")
         return self._fetch_with_browser(url, quick_mode=True)
 
     def _fetch_high_risk(self, url: str) -> str:
-        is_ipdb = 'ipdb.api.030101.xyz' in url
+        # 针对ip.flares.cloud的特殊处理：延长JS渲染等待
+        is_flares = 'ip.flares.cloud' in url
         
         if not self.driver:
             self.driver = self._create_driver()
         
         try:
-            logging.info(f"浏览器访问高风险站点：{url}")
+            logging.info(f"浏览器访问 {url}")
             self.driver.get(url)
-            wait_time = 20 if is_ipdb else 15
+            # 等待IP表格加载完成（最长20秒）
+            wait_time = 20 if is_flares else 15
             WebDriverWait(self.driver, wait_time).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div.tabulator-cell[tabulator-field='ip']"))
             )
-            js_wait = random.uniform(8, 12) if is_ipdb else random.uniform(3, 5)
-            logging.info(f"等待JS渲染：{js_wait:.1f}秒")
+            # 额外等待JS渲染IP（该站点需要更长时间）
+            js_wait = random.uniform(8, 12) if is_flares else random.uniform(5, 8)
+            logging.info(f"等待JS渲染IP：{js_wait:.1f}秒")
             time.sleep(js_wait)
             
-            page_source = self.driver.page_source
-            if IP_PATTERN.search(page_source) or IP_WITH_PORT_PATTERN.search(page_source):
-                return page_source
-            
-            logging.warning(f"无IP，刷新重试")
-            self.driver.refresh()
-            time.sleep(js_wait)
             return self.driver.page_source
         except Exception as e:
-            logging.error(f"高风险站点访问失败：{e}")
+            logging.error(f"浏览器访问失败：{e}")
             return ""
 
     def _create_driver(self) -> uc.Chrome:
@@ -175,54 +164,52 @@ class SmartFetcher:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument(f"user-agent={self.anti_block.ua.random}")
-        options.headless = False
+        options.headless = False  # 必须关闭无头模式
         driver = uc.Chrome(options=options)
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
         })
         return driver
 
-# -------------------------- IP提取（适配新增站点） --------------------------
+# -------------------------- IP提取（增强ip.flares.cloud提取） --------------------------
 def extract_ips(html: str, url: str) -> List[str]:
     if not html:
-        logging.warning(f"[{url}] 页面为空")
-        return []
-    
-    has_ip = IP_PATTERN.search(html) or IP_WITH_PORT_PATTERN.search(html)
-    if not has_ip:
-        logging.warning(f"[{url}] 页面无有效IP")
         return []
     
     domain = url.split("//")[-1].split("/")[0].split(".")[-2]
     ips = []
 
-    # 优先用站点规则提取（包含新增的ip.flares.cloud）
+    # 重点处理ip.flares.cloud
+    if domain == 'ip.flares.cloud':
+        soup = BeautifulSoup(html, "lxml")
+        # 查找所有IP标签（该网站用表格展示，多个IP标签）
+        ip_tags = soup.find_all('div', {'class': 'tabulator-cell', 'tabulator-field': 'ip'})
+        for tag in ip_tags:
+            ip = tag.get_text().strip()
+            if IP_PATTERN.match(ip):  # 验证是否为有效IP
+                ips.append(ip)
+        logging.info(f"[{url}] 提取到 {len(ips)} 个IP")
+        return ips
+
+    # 其他站点提取逻辑
     if domain in SITE_RULES:
         rule = SITE_RULES[domain]
         if 'script_pattern' in rule:
             script_match = re.search(rule['script_pattern'], html, re.IGNORECASE | re.DOTALL)
             if script_match:
-                ips_str = script_match.group(1)
-                ips = re.findall(rule['ip_clean_pattern'], ips_str)
-                logging.info(f"[{url}] JS规则提取到 {len(ips)} 个IP")
+                ips = re.findall(rule['ip_clean_pattern'], script_match.group(1))
                 return ips
         elif 'tag' in rule:
             soup = BeautifulSoup(html, "lxml")
-            # 查找所有符合条件的标签（可能有多个IP标签）
             target_tags = soup.find_all(rule['tag'], attrs=rule['attrs'])
             if target_tags:
-                # 从每个标签中提取IP
                 for tag in target_tags:
                     content = tag.get_text().strip()
-                    if IP_PATTERN.match(content):  # 确保内容是IP
+                    if IP_PATTERN.match(content):
                         ips.append(content)
-                logging.info(f"[{url}] 标签规则提取到 {len(ips)} 个IP")
                 return ips
 
-    # 通用提取（兜底）
-    ips = IP_PATTERN.findall(html) + IP_WITH_PORT_PATTERN.findall(html)
-    logging.info(f"[{url}] 通用规则提取到 {len(ips)} 个IP")
-    return ips
+    return IP_PATTERN.findall(html)
 
 # -------------------------- 主流程 --------------------------
 def process_url(url: str, risk_level: str, fetcher: SmartFetcher, anti_block: AntiBlockTool) -> Set[str]:
@@ -232,11 +219,7 @@ def process_url(url: str, risk_level: str, fetcher: SmartFetcher, anti_block: An
         raw_ips = extract_ips(html, url)
         for ip in raw_ips:
             ip_clean = ip.split(":")[0]
-            if (
-                len(ip_clean.split(".")) == 4
-                and not ip_clean.startswith(("10.", "192.168.", "172."))
-                and all(0 <= int(seg) <= 255 for seg in ip_clean.split("."))
-            ):
+            if len(ip_clean.split(".")) == 4 and not ip_clean.startswith(("10.", "192.168.")):
                 ips.add(ip)
         logging.info(f"[{url}] 有效IP：{len(ips)} 个")
     except Exception as e:
@@ -257,23 +240,15 @@ def main():
             all_ips.update(future.result())
 
     for risk_level in ['medium', 'high']:
-        logging.info(f"\n=== 处理{risk_level}风险站点（串行） ===")
+        logging.info(f"\n=== 处理{risk_level}风险站点 ===")
         for url in URLS[risk_level]:
             ips = process_url(url, risk_level, fetcher, anti_block)
             all_ips.update(ips)
 
     sorted_ips = sorted(all_ips, key=lambda x: tuple(map(int, x.split(":")[0].split("."))))
-    try:
-        with open(OUTPUT_FILE, "w", encoding="utf8") as f:
-            f.write("\n".join(sorted_ips))
-        file_path = os.path.abspath(OUTPUT_FILE)
-        logging.info(f"\n=== 抓取完成 ===")
-        logging.info(f"总耗时：{time.time() - start_time:.2f}秒")
-        logging.info(f"总有效IP数：{len(sorted_ips)}个（已去重）")
-        logging.info(f"IP已保存到：{file_path}")
-    except Exception as e:
-        logging.error(f"保存文件失败！原因：{e}")
-        logging.error(f"请检查路径权限：{os.path.abspath(OUTPUT_FILE)}")
+    with open(OUTPUT_FILE, "w", encoding="utf8") as f:
+        f.write("\n".join(sorted_ips))
+    logging.info(f"总IP数：{len(sorted_ips)}，保存至 {os.path.abspath(OUTPUT_FILE)}")
 
 if __name__ == "__main__":
     main()
